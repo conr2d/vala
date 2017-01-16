@@ -104,6 +104,7 @@ libvala_la_VALASOURCES = \
 	valamethodtype.vala \
 	valanamedargument.vala \
 	valanamespace.vala \
+	valanullconditionalexpression.vala \
 	valanullliteral.vala \
 	valanulltype.vala \
 	valaobjectcreationexpression.vala \

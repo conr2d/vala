@@ -668,4 +668,12 @@ public abstract class Vala.CodeVisitor {
 	 */
 	public virtual void visit_end_full_expression (Expression expr) {
 	}
+
+	/**
+	 * Visit operation called for null-conditional expressions.
+	 *
+	 * @param expr a null-conditional expression
+	 */
+	public virtual void visit_null_conditional_expression (NullConditionalExpression expr) {
+	}
 }

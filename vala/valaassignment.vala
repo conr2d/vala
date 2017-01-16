@@ -108,6 +108,12 @@ public class Vala.Assignment : Expression {
 
 		checked = true;
 
+		if (left is NullConditionalExpression) {
+			error = true;
+			Report.error (source_reference, "unsupported lvalue in assignment");
+			return false;
+		}
+
 		if (left is Tuple && operator == AssignmentOperator.SIMPLE && parent_node is ExpressionStatement) {
 			var tuple = (Tuple) left;
 

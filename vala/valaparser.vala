@@ -37,6 +37,13 @@ public class Vala.Parser : CodeVisitor {
 	// number of tokens in buffer
 	int size;
 
+	NullConditional[] null_conditional_stack;
+
+	struct NullConditional {
+		public bool matched;
+		public List<Expression> nullable_expressions;
+	}
+
 	Comment comment;
 
 	const int BUFFER_SIZE = 32;
@@ -141,6 +148,10 @@ public class Vala.Parser : CodeVisitor {
 	string get_last_string () {
 		int last_index = (index + BUFFER_SIZE - 1) % BUFFER_SIZE;
 		var token = tokens[last_index];
+		if (is_null_conditional () && (token.type == TokenType.INTERR)) {
+			last_index = (index + BUFFER_SIZE - 2) % BUFFER_SIZE;
+			token = tokens[last_index];
+		}
 		return ((string) token.begin.pos).substring (0, (int) (token.end.pos - token.begin.pos));
 	}
 
@@ -659,10 +670,15 @@ public class Vala.Parser : CodeVisitor {
 			break;
 		}
 
+		null_conditional_stack += NullConditional ();
+
 		// process primary expressions that start with an inner primary expression
 		bool found = true;
 		while (found) {
 			switch (current ()) {
+			case TokenType.INTERR:
+				found = check_null_conditional ();
+				break;
 			case TokenType.DOT:
 				expr = parse_member_access (begin, expr);
 				break;
@@ -686,6 +702,9 @@ public class Vala.Parser : CodeVisitor {
 				break;
 			}
 		}
+
+		expr = parse_null_conditional_expression (begin, expr);
+		null_conditional_stack.resize (null_conditional_stack.length - 1);
 
 		return expr;
 	}
@@ -763,6 +782,11 @@ public class Vala.Parser : CodeVisitor {
 				expr.add_type_argument (type_arg);
 			}
 		}
+		if (is_null_conditional ()) {
+			int last_index = null_conditional_stack.length - 1;
+			null_conditional_stack[last_index].matched = false;
+			null_conditional_stack[last_index].nullable_expressions.add (expr);
+		}
 		return expr;
 	}
 
@@ -818,15 +842,23 @@ public class Vala.Parser : CodeVisitor {
 		}
 		expect (TokenType.CLOSE_BRACKET);
 
+		Expression expr;
 		if (stop == null) {
-			var expr = new ElementAccess (inner, get_src (begin));
+			expr = new ElementAccess (inner, get_src (begin));
+			var ea = expr as ElementAccess;
 			foreach (Expression index in index_list) {
-				expr.append_index (index);
+				ea.append_index (index);
 			}
-			return expr;
 		} else {
-			return new SliceExpression (inner, index_list[0], stop, get_src (begin));
+			expr = new SliceExpression (inner, index_list[0], stop, get_src (begin));
 		}
+
+		if (is_null_conditional ()) {
+			int last_index = null_conditional_stack.length - 1;
+			null_conditional_stack[last_index].matched = false;
+			null_conditional_stack[last_index].nullable_expressions.add (expr);
+		}
+		return expr;
 	}
 
 	List<Expression> parse_expression_list () throws ParseError {
@@ -1006,7 +1038,8 @@ public class Vala.Parser : CodeVisitor {
 
 		var call = expr as MethodCall;
 		var object_creation = expr as ObjectCreationExpression;
-		if (call == null && object_creation == null) {
+		var null_conditional = expr as NullConditionalExpression;
+		if (call == null && object_creation == null && null_conditional == null) {
 			Report.error (expr.source_reference, "syntax error, expected method call");
 			throw new ParseError.SYNTAX ("expected method call");
 		}
@@ -1015,6 +1048,11 @@ public class Vala.Parser : CodeVisitor {
 			call.is_yield_expression = true;
 		} else if (object_creation != null) {
 			object_creation.is_yield_expression = true;
+		} else if (null_conditional != null) {
+			var method_call = null_conditional.inner as MethodCall;
+			if (method_call != null) {
+				method_call.is_yield_expression = true;
+			}
 		}
 
 		return expr;
@@ -3570,6 +3608,38 @@ public class Vala.Parser : CodeVisitor {
 		default:
 			return false;
 		}
+	}
+
+	bool is_null_conditional () {
+		return ((null_conditional_stack.length > 0) && null_conditional_stack[null_conditional_stack.length - 1].matched);
+	}
+
+	bool check_null_conditional () {
+		next ();
+		if (!(current () == TokenType.DOT) && !(current () == TokenType.OPEN_BRACKET)) {
+			prev ();
+			return false;
+		}
+
+		int last_index = null_conditional_stack.length - 1;
+		null_conditional_stack[last_index].matched = true;
+		if (null_conditional_stack[last_index].nullable_expressions == null) {
+			null_conditional_stack[last_index].nullable_expressions = new ArrayList<Expression> ();
+		}
+
+		return true;
+	}
+
+	Expression parse_null_conditional_expression (SourceLocation begin, Expression inner) throws ParseError {
+		int last_index = null_conditional_stack.length - 1;
+		if (null_conditional_stack[last_index].nullable_expressions != null) {
+			var expr = new NullConditionalExpression (inner, get_src (begin));
+			foreach (var nullable_expr in null_conditional_stack[last_index].nullable_expressions) {
+				expr.add_nullable_expression (nullable_expr);
+			}
+			return expr;
+		}
+		return inner;
 	}
 }
 
