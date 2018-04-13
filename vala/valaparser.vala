@@ -2356,6 +2356,7 @@ public class Vala.Parser : CodeVisitor {
 					}
 				case TokenType.OPEN_BRACE:
 				case TokenType.THROWS:
+				case TokenType.LAMBDA:
 					rollback (begin);
 					parse_property_declaration (parent, attrs);
 					return;
@@ -2749,12 +2750,35 @@ public class Vala.Parser : CodeVisitor {
 			expect (TokenType.CLOSE_PARENS);
 		}
 		if (!accept (TokenType.SEMICOLON)) {
-			method.body = parse_block ();
+			if (!accept (TokenType.LAMBDA)) {
+				method.body = parse_block ();
+			} else {
+				method.body = parse_expression_bodied_function (type);
+			}
 		} else if (scanner.source_file.file_type == SourceFileType.PACKAGE) {
 			method.external = true;
 		}
 
 		parent.add_method (method);
+	}
+
+	Block parse_expression_bodied_function (DataType type) throws ParseError {
+		var begin = get_location ();
+		var block = new Block (get_src (begin));
+
+		Statement stmt;
+		var expr = parse_expression ();
+		expect (TokenType.SEMICOLON);
+		if (type is VoidType) {
+			stmt = new ExpressionStatement (expr, get_src (begin));
+		} else {
+			stmt = new ReturnStatement (expr, get_src (begin));
+		}
+
+		block.add_statement (stmt);
+		block.source_reference.end = get_current_src ().end;
+
+		return block;
 	}
 
 	void parse_property_declaration (Symbol parent, List<Attribute>? attrs) throws ParseError {
@@ -2812,75 +2836,93 @@ public class Vala.Parser : CodeVisitor {
 			} while (accept (TokenType.COMMA));
 			Report.error (prop.source_reference, "properties throwing errors are not supported yet");
 		}
-		expect (TokenType.OPEN_BRACE);
-		while (current () != TokenType.CLOSE_BRACE) {
-			if (accept (TokenType.DEFAULT)) {
-				if (prop.initializer != null) {
-					throw new ParseError.SYNTAX ("property default value already defined");
-				}
-				expect (TokenType.ASSIGN);
-				prop.initializer = parse_expression ();
-				expect (TokenType.SEMICOLON);
-			} else {
-				comment = scanner.pop_comment ();
-
-				var accessor_begin = get_location ();
-				var accessor_attrs = parse_attributes ();
-				var accessor_access = parse_access_modifier (SymbolAccessibility.PUBLIC);
-
-				var value_type = type.copy ();
-				if (accept (TokenType.OWNED)) {
-					value_type.value_owned = true;
+		if (accept (TokenType.OPEN_BRACE)) {
+			while (current () != TokenType.CLOSE_BRACE) {
+				if (accept (TokenType.DEFAULT)) {
+					if (prop.initializer != null) {
+						throw new ParseError.SYNTAX ("property default value already defined");
+					}
+					expect (TokenType.ASSIGN);
+					prop.initializer = parse_expression ();
+					expect (TokenType.SEMICOLON);
 				} else {
-					value_type.value_owned = false;
-					if (accept (TokenType.UNOWNED)) {
-						Report.warning (get_last_src (), "property getters are `unowned' by default");
-					}
-				}
+					comment = scanner.pop_comment ();
 
-				if (accept (TokenType.GET)) {
-					if (prop.get_accessor != null) {
-						throw new ParseError.SYNTAX ("property get accessor already defined");
-					}
+					var accessor_begin = get_location ();
+					var accessor_attrs = parse_attributes ();
+					var accessor_access = parse_access_modifier (SymbolAccessibility.PUBLIC);
 
-					if (getter_owned) {
+					var value_type = type.copy ();
+					if (accept (TokenType.OWNED)) {
 						value_type.value_owned = true;
+					} else {
+						value_type.value_owned = false;
+						if (accept (TokenType.UNOWNED)) {
+							Report.warning (get_last_src (), "property getters are `unowned' by default");
+						}
 					}
 
-					Block block = null;
-					if (!accept (TokenType.SEMICOLON)) {
-						block = parse_block ();
-						prop.external = false;
-					}
-					prop.get_accessor = new PropertyAccessor (true, false, false, value_type, block, get_src (accessor_begin), comment);
-					set_attributes (prop.get_accessor, accessor_attrs);
-					prop.get_accessor.access = accessor_access;
-				} else {
-					bool writable, _construct;
-					if (accept (TokenType.SET)) {
-						writable = true;
-						_construct = accept (TokenType.CONSTRUCT);
-					} else if (accept (TokenType.CONSTRUCT)) {
-						_construct = true;
-						writable = accept (TokenType.SET);
+					if (accept (TokenType.GET)) {
+						if (prop.get_accessor != null) {
+							throw new ParseError.SYNTAX ("property get accessor already defined");
+						}
+
+						if (getter_owned) {
+							value_type.value_owned = true;
+						}
+
+						Block block = null;
+						if (accept (TokenType.LAMBDA)) {
+							block = parse_expression_bodied_function (type);
+							prop.external = false;
+						} else if (!accept (TokenType.SEMICOLON)) {
+							block = parse_block ();
+							prop.external = false;
+						}
+						prop.get_accessor = new PropertyAccessor (true, false, false, value_type, block, get_src (accessor_begin), comment);
+						set_attributes (prop.get_accessor, accessor_attrs);
+						prop.get_accessor.access = accessor_access;
 					} else {
-						throw new ParseError.SYNTAX ("expected get, set, or construct");
+						bool writable, _construct;
+						if (accept (TokenType.SET)) {
+							writable = true;
+							_construct = accept (TokenType.CONSTRUCT);
+						} else if (accept (TokenType.CONSTRUCT)) {
+							_construct = true;
+							writable = accept (TokenType.SET);
+						} else {
+							throw new ParseError.SYNTAX ("expected get, set, or construct");
+						}
+						if (prop.set_accessor != null) {
+							throw new ParseError.SYNTAX ("property set accessor already defined");
+						}
+						Block block = null;
+						if (accept (TokenType.LAMBDA)) {
+							block = parse_expression_bodied_function (new VoidType (get_src (begin)));
+							prop.external = false;
+						} else if (!accept (TokenType.SEMICOLON)) {
+							block = parse_block ();
+							prop.external = false;
+						}
+						prop.set_accessor = new PropertyAccessor (false, writable, _construct, value_type, block, get_src (accessor_begin), comment);
+						set_attributes (prop.set_accessor, accessor_attrs);
+						prop.set_accessor.access = accessor_access;
 					}
-					if (prop.set_accessor != null) {
-						throw new ParseError.SYNTAX ("property set accessor already defined");
-					}
-					Block block = null;
-					if (!accept (TokenType.SEMICOLON)) {
-						block = parse_block ();
-						prop.external = false;
-					}
-					prop.set_accessor = new PropertyAccessor (false, writable, _construct, value_type, block, get_src (accessor_begin), comment);
-					set_attributes (prop.set_accessor, accessor_attrs);
-					prop.set_accessor.access = accessor_access;
 				}
 			}
+			expect (TokenType.CLOSE_BRACE);
+		} else if (expect (TokenType.LAMBDA)) {
+			comment = scanner.pop_comment ();
+
+			var accessor_begin = get_location ();
+			var value_type = type.copy ();
+
+			var block = parse_expression_bodied_function (value_type);
+			prop.external = false;
+
+			prop.get_accessor = new PropertyAccessor (true, false, false, value_type, block, get_src (accessor_begin), comment);
+			prop.get_accessor.access = prop.access;
 		}
-		expect (TokenType.CLOSE_BRACE);
 
 		if (!prop.is_abstract && prop.source_type == SourceFileType.SOURCE) {
 			bool empty_get = (prop.get_accessor != null && prop.get_accessor.body == null);
